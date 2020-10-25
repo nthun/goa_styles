@@ -14,6 +14,22 @@ editor_options:
 
 Goa has several subgenres and some of them are difficult to tell apart. I want to build a classifier to predict genres based on music features.
 
+## Highlights
+
+-   Webscraping using rvest
+
+-   Using the spotifyr package to get music features
+
+-   Exploring the music features
+
+-   Building a random forest classifier on bootstrap resamples using tidymodels
+
+-   Estimating the importance of each feature using the vip package
+
+-   Creating a network of subgenres from the confusion matrix
+
+-   Misc: using tidyverse for data wrangling and rectangling
+
 ```{r setup,	echo = TRUE, message = FALSE, warning = FALSE}
 # Load packages
 library(tidyverse)
@@ -21,6 +37,7 @@ library(rvest)
 library(spotifyr)
 library(tidytext)
 library(tidymodels)
+library(vip)
 library(igraph)
 library(ggraph)
 
@@ -98,6 +115,14 @@ goa <-
   select(genre, track_name, danceability:tempo) %>% 
   mutate(genre = factor(genre))
 
+# Balance the data by sampling exactly 10 tracks from each genre
+set.seed(1)
+goa <-
+  goa %>% 
+  group_by(genre) %>% 
+  sample_n(10) %>% 
+  ungroup()
+
 # Put data into long format, calculate confidence intervals
 goa_long <- 
   goa %>% 
@@ -151,7 +176,7 @@ goa_boot <- bootstraps(goa)
 rf_spec <- 
   rand_forest(trees = 1000) %>%
   set_mode("classification") %>%
-  set_engine("ranger")
+  set_engine("ranger", importance = "permutation")
 
 # Create workflow
 goa_wf <- 
@@ -168,7 +193,9 @@ goa_rs <-
   goa_wf %>% 
   fit_resamples(resamples = goa_boot,
                 metrics = metric_set(roc_auc, specificity, sensitivity),
-                control = control_resamples(save_pred = TRUE))
+                control = control_resamples(verbose = TRUE,
+                                            save_pred = TRUE,
+                                            save_workflow = TRUE))
 
 goa_rs %>% 
   collect_metrics()
@@ -188,6 +215,21 @@ goa_rs %>%
   geom_path(show.legend = FALSE, alpha = 0.6, size = 1.2) +
   facet_wrap(~.pred_class, ncol = 5) +
   coord_equal()
+```
+
+## Importance of the features
+
+We can evaluate the importance of the features. It seems like tempo is by far the most important feature, followed by danceability and energy. Mode is not especially helpful (I'm not even sure what it means).
+
+```{r}
+
+rf_spec %>% 
+  set_engine("ranger", importance = "permutation") %>%
+  fit(genre ~ ., data = goa) %>% 
+  vip(geom = "col") +
+  aes(fill = Variable) +
+  scale_fill_viridis_d(option = "viridis") +
+  labs(title = "Variable importance for classification")
 ```
 
 ## Explore which genres are easier to confuse with each other
@@ -214,35 +256,37 @@ goa_conf_perc %>%
       label = scales::percent(perc, accuracy = 1)) +
   geom_tile(show.legend = FALSE) +
   geom_text(size = 3) +
+  scale_fill_viridis_c(option = "plasma") +
   labs(title = "Confusion matrix for the random forest model",
        subtitle = "Percent of correct classifications in the genre",
        x = "Truth")
 
-# This shows the frequencies rather than percents (maybe remove?)
-# goa_confusion %>% 
-#   autoplot(type = "heatmap") +
-#   ggtitle("Confusion matrix for the random forest model")
-  
 ```
 
 Let's visualize how easy it is to confuse certain genres with others by building a network graph!
 
 ```{r message=FALSE, warning=FALSE}
 
-goa_conf_perc %>% 
+goa_graph <-
+  goa_conf_perc %>% 
   filter(Prediction != Truth & n > 0) %>% 
   select(Prediction, Truth, perc) %>% 
-  graph_from_data_frame(directed = FALSE) %>% 
+  graph_from_data_frame(directed = FALSE)
+
+goa_graph %>% 
   ggraph() +
-  geom_edge_link(aes(edge_width = perc, edge_alpha = perc)) +
-  scale_edge_alpha(range = c(.1, .9)) +
+  geom_edge_link(aes(edge_width = perc),
+                 alpha = .4) +
   scale_edge_width(range = c(.01, 3)) +
-  geom_node_text(aes(label = name), size = 4) +
+  geom_node_text(aes(label = name, 
+                     size = betweenness(goa_graph),
+                     color = name),
+                 show.legend = FALSE) +
+  scale_size(range = c(3,6)) +
+  scale_color_viridis_d(option = "plasma") +
   guides(fill = FALSE, alpha = FALSE, edge_alpha = FALSE, edge_width = FALSE) +
   theme_graph() +
   labs(title = "Confusion map of psytrance subgenres",
-       subtitle = "The wider the connection between genre names, the easier to confuse")
-
-    
+       subtitle = "The wider the connection between genre names, the easier to confuse.\nThe size of the node shows the centrality (betweenness)")
 
 ```
